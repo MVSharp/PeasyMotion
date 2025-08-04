@@ -13,6 +13,7 @@
     <Compile Include="$(MSBuildThisFileDirectory)BaseOptionPage.cs">
       <SubType>Component</SubType>
     </Compile>
+    <Compile Include="$(MSBuildThisFileDirectory)CharExtensions.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)CommandExecutorService.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)GlobalSuppressions.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)HResult.cs" />

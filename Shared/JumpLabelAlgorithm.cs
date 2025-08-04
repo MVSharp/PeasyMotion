@@ -9,70 +9,142 @@ public class JumpLabelAlgorithm
     private readonly JumpMode jumpMode;
     private readonly int      caretPositionSensivity;
     private readonly string   nCharSearchJumpKeys;
-    private const int MinimumDistanceBetweenLabels = 3;
+    private const    int      MinimumDistanceBetweenLabels = 3;
+    private readonly bool     vimOrBulkyCaretPresent;
+
     public JumpLabelAlgorithm(string allowedKeys, JumpMode jumpMode, int caretPositionSensivity,
-                              string nCharSearchJumpKeys = null)
+                              string nCharSearchJumpKeys    = null,
+                              bool   vimOrBulkyCaretPresent = true)
     {
         this.allowedKeys            = allowedKeys;
         this.jumpMode               = jumpMode;
         this.caretPositionSensivity = caretPositionSensivity;
         this.nCharSearchJumpKeys    = nCharSearchJumpKeys;
+        this.vimOrBulkyCaretPresent = vimOrBulkyCaretPresent;
     }
 
     public List<JumpTarget> CollectJumpTargets(string text, int cursorPosition, int startPosition, int endPosition)
     {
-        var jumpTargets = new List<JumpTarget>();
-        var lastJumpPos = -100;
-        var prevIsLetterOrDigit = false;
-
-        for (var i = startPosition; i <= endPosition && i < text.Length; i++)
+        var context = new JumpTargetContext
         {
-            var ch                 = text[i];
-            var nextCh             = i < text.Length - 1 ? text[i + 1] : '\0';
-            var curIsLetterOrDigit = char.IsLetterOrDigit(ch);
-            var candidateLabel     = false;
+            JumpTargets  = new List<JumpTarget>(),
+            LastJumpPos  = -100,
+            EolWindows   = false,
+            EolCharCount = 0
+        };
 
-            switch (jumpMode)
+        int adjustedCursor = AdjustCursorPosition(cursorPosition);
+        ProcessTextRange(text, startPosition, endPosition, adjustedCursor, context);
+
+        return context.JumpTargets;
+    }
+
+    private int AdjustCursorPosition(int cursorPosition)
+    {
+        if (caretPositionSensivity <= 0) return cursorPosition;
+        int dc = caretPositionSensivity + 1;
+        return (cursorPosition / dc) * dc + (dc / 2);
+    }
+
+    private void ProcessTextRange(string            text, int startPosition, int endPosition, int adjustedCursor,
+                                  JumpTargetContext context)
+    {
+        bool prevIsLetterOrDigit = false, prevIsControl = false, prevNewLine = false;
+
+        for (int i = startPosition; i <= endPosition && i < text.Length; i++)
+        {
+            var chars = GetCharContext(text, i, endPosition);
+            var (isEol, eolWindows, eolCharCount) =
+                chars.Current.IsEOL(chars.Previous, chars.Next, context.EolWindows, context.EolCharCount);
+            context.EolWindows   = eolWindows;
+            context.EolCharCount = eolCharCount;
+
+            int jumpPosModifier = jumpMode == JumpMode.LineBeginingJump ? 1 : 0;
+            if (jumpMode == JumpMode.LineBeginingJump && (i == startPosition || isEol))
             {
-                case JumpMode.LineJumpToWordBegining:
-                    candidateLabel = curIsLetterOrDigit && !prevIsLetterOrDigit;
-                    break;
-                case JumpMode.LineJumpToWordEnding:
-                    candidateLabel = curIsLetterOrDigit && !char.IsLetterOrDigit(nextCh);
-                    break;
-                case JumpMode.LineBeginingJump:
-                    candidateLabel = ch == '\n' || ch == '\r' || i == startPosition;
-                    break;
-                case JumpMode.TwoCharJump:
-                    candidateLabel = i < text.Length - 1 && 
-                        char.ToLowerInvariant(ch) == nCharSearchJumpKeys[0] &&
-                        char.ToLowerInvariant(nextCh) == nCharSearchJumpKeys[1];
-                    break;
-                case JumpMode.OneCharJump:
-                    candidateLabel = char.ToLowerInvariant(ch) == nCharSearchJumpKeys[0];
-                    break;
-                default:
-                    candidateLabel = curIsLetterOrDigit && !prevIsLetterOrDigit;
-                    break;
+                jumpPosModifier = FindNextNonEmptyPosition(text, i + 1, endPosition, context) - i;
             }
 
-            if (candidateLabel && (lastJumpPos + MinimumDistanceBetweenLabels) < i && i < endPosition)
+            bool isCandidate = IsCandidateLabel(chars, prevIsLetterOrDigit, isEol, i, startPosition, text);
+            bool isValidDistance = (context.LastJumpPos + jumpPosModifier + MinimumDistanceBetweenLabels) < i ||
+                                   (prevNewLine && isEol);
+
+            if (isCandidate && isValidDistance && i < endPosition)
             {
-                var adjustedCursor = (cursorPosition / (caretPositionSensivity + 1)) * (caretPositionSensivity + 1) +
-                                     (caretPositionSensivity / 2);
-                jumpTargets.Add(new JumpTarget(
-                    position: i,
-                    text: ch.ToString(),
-                    distanceToCursor: Math.Abs(i - adjustedCursor),
-                    metadata: null
-                ));
-                lastJumpPos = i;
+                int jumpPos = Math.Min(i + jumpPosModifier, endPosition);
+                context.JumpTargets.Add(new JumpTarget(
+                                                       position: jumpPos,
+                                                       text: chars.Current.ToString(),
+                                                       distanceToCursor: Math.Abs(jumpPos - adjustedCursor),
+                                                       metadata: null
+                                                      ));
+                context.LastJumpPos = isEol ? -100 : jumpPos;
             }
 
-            prevIsLetterOrDigit = curIsLetterOrDigit;
+            prevIsLetterOrDigit = char.IsLetterOrDigit(chars.Current);
+            prevIsControl       = char.IsControl(chars.Current);
+            prevNewLine         = isEol;
+        }
+    }
+
+    private (char Current, char Previous, char Next) GetCharContext(string text, int index, int endPosition)
+    {
+        return (
+            Current: text[index],
+            Previous: index > 0 ? text[index                                  - 1] : '\0',
+            Next: index < text.Length - 1 && index < endPosition ? text[index + 1] : '\0'
+        );
+    }
+
+    private int FindNextNonEmptyPosition(string text, int start, int endPosition, JumpTargetContext context)
+    {
+        for (int j = start; j <= endPosition && j < text.Length; j++)
+        {
+            var ch     = text[j];
+            var nextCh = j < text.Length - 1 ? text[j + 1] : '\0';
+            var (isEol, eolWindows, eolCharCount) = ch.IsEOL(ch, nextCh, context.EolWindows, context.EolCharCount);
+            context.EolWindows                    = eolWindows;
+            context.EolCharCount                  = eolCharCount;
+            if (ch != ' ' && !isEol) return j;
+            if (isEol) break;
         }
 
-        return jumpTargets;
+        return start;
+    }
+
+    private bool IsCandidateLabel((char Current, char Previous, char Next) chars, bool prevIsLetterOrDigit,
+                                  bool newLine, int index, int startPosition, string text)
+    {
+        bool curIsLetterOrDigit = char.IsLetterOrDigit(chars.Current);
+        switch (jumpMode)
+        {
+            case JumpMode.LineJumpToWordBegining:
+                return curIsLetterOrDigit && !prevIsLetterOrDigit;
+            case JumpMode.LineJumpToWordEnding:
+                return vimOrBulkyCaretPresent
+                    ? curIsLetterOrDigit  && !char.IsLetterOrDigit(chars.Next)
+                    : prevIsLetterOrDigit && !curIsLetterOrDigit;
+            case JumpMode.LineBeginingJump:
+                return (index == startPosition || newLine) && index < text.Length;
+            case JumpMode.TwoCharJump:
+                return index                                < text.Length - 1         &&
+                       char.ToLowerInvariant(chars.Current) == nCharSearchJumpKeys[0] &&
+                       char.ToLowerInvariant(chars.Next)    == nCharSearchJumpKeys[1];
+            case JumpMode.OneCharJump:
+                return char.ToLowerInvariant(chars.Current) == nCharSearchJumpKeys[0];
+            default:
+                return (curIsLetterOrDigit              && !prevIsLetterOrDigit) ||
+                       (char.IsControl(chars.Previous)  && newLine)              ||
+                       (!char.IsControl(chars.Previous) && !prevIsLetterOrDigit && newLine);
+        }
+    }
+
+    private class JumpTargetContext
+    {
+        public List<JumpTarget> JumpTargets  { get; set; }
+        public int              LastJumpPos  { get; set; }
+        public bool             EolWindows   { get; set; }
+        public int              EolCharCount { get; set; }
     }
 
     public List<JumpLabel> AssignLabels(List<JumpTarget> targets)
@@ -135,7 +207,8 @@ public class JumpLabelAlgorithm
         }
     }
 
-    public List<JumpLabel> FilterLabels(List<JumpLabel> labels, string input) => labels.Where(l => l.Label.StartsWith(input, StringComparison.InvariantCulture)).ToList();
+    public List<JumpLabel> FilterLabels(List<JumpLabel> labels, string input) =>
+        labels.Where(l => l.Label.StartsWith(input, StringComparison.InvariantCulture)).ToList();
 
     private static string Reverse(string s)
     {
