@@ -83,7 +83,8 @@ namespace PeasyMotion
                                                caretPositionSensivity: Math.Min(int.MaxValue >> 2,
                                                                                     Math.Abs(GeneralOptions.Instance
                                                                                                 .caretPositionSensivity)),
-                                               nCharSearchJumpKeys: args.nCharSearchJumpKeys
+                                               nCharSearchJumpKeys: args.nCharSearchJumpKeys,
+                                               vimOrBulkyCaretPresent
                                               );
 
             layer                      =  view?.GetAdornmentLayer("PeasyMotionEdAdornment");
